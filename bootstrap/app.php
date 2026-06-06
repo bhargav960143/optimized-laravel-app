@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Middleware\MinifyHtml;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -11,7 +12,8 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        //
+        $middleware->appendToGroup('api', MinifyHtml::class);
+        $middleware->appendToGroup('web', MinifyHtml::class);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //
