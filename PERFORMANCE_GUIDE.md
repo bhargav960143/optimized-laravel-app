@@ -677,3 +677,146 @@ byte-for-byte. For real-world web apps (read-heavy, cacheable, CRUD), this stack
 Octane + Redis + nginx RAM cache + tuned MySQL — delivers the same effective
 throughput as Go/Bun from the client's perspective. The goal is achievable with
 existing packages and infrastructure alone; no custom engine required.
+
+---
+
+## Implementation Results — Real-World Execution
+
+> **Server:** Debian 12 · 2-core Intel Xeon · 2GB RAM · 59GB NVMe SSD
+> **App:** Laravel 12 · SwiftRide taxi booking landing page · Inquiry form with DB save
+> **Date:** 2026-06-06
+
+---
+
+### Actual Benchmark Numbers
+
+| Phase implemented | RPS | p50 | p99 | Payload | Cache layer |
+|---|---|---|---|---|---|
+| PHP-FPM baseline (estimated) | ~240 | ~400ms | ~1,500ms | 41KB | none |
+| + Octane + Swoole (4 workers) | 315 | 154ms | 715ms | 41KB | none |
+| + OPcache + JIT + Redis + Artisan caches | 315 | 154ms | 715ms | 41KB | none |
+| + **Nginx RAM micro-cache** | **9,031** | **12ms** | **18ms** | 41KB | Nginx `/dev/shm` |
+| + PHP 8.3 upgrade | 3,833* | 12ms | 29ms | 40KB | Nginx |
+| + **Cloudflare edge cache** | edge HIT | **<5ms** | **<10ms** | 40KB | CF + Nginx |
+| + **Brotli level 9** | edge HIT | <5ms | <10ms | 6.5KB | CF + Nginx |
+| + **HTML minification middleware** | edge HIT | <5ms | <10ms | 6.1KB | CF + Nginx |
+| + **FrankenPHP PHP 8.5** | **373** | **130ms** | **166ms** | 6.1KB | CF + Nginx |
+
+> \* RPS number dropped when page size grew from 14KB → 40KB (full landing page redesign).
+> Network throughput actually *increased*: 123 MB/s → 154 MB/s. Same Nginx ceiling.
+
+**Tool:** `wrk -t2 -c50 -d15s --latency` from the server itself (localhost for direct, HTTPS for full stack).
+
+---
+
+### Cache Waterfall Architecture
+
+```
+Real user → Cloudflare PoP (Mumbai BOM) ─── HIT → <5ms   [30s TTL]
+                        │ MISS
+                        ▼
+            Nginx RAM cache (/dev/shm) ────── HIT → ~8ms   [30s TTL]
+                        │ MISS
+                        ▼
+            FrankenPHP worker (PHP 8.5) ───── 130ms p50
+                        │
+                        ▼
+            MariaDB (persistent PDO) ──────── ~2ms
+```
+
+---
+
+### Master Checklist — Actual Status
+
+- [x] **0.** Baseline benchmark harness — `wrk` installed, benchmarks logged in `benchmarks/`
+- [x] **1.** Octane + Swoole → **migrated to FrankenPHP** (Swoole was replaced — see below)
+- [x] **2.** OPcache + JIT — `tracing` mode, 64MB buffer, `validate_timestamps=0`
+- [x] **2.** OPcache preload — **enabled** (was blocked by Swoole 6.x anonymous class crash; FrankenPHP has no issue)
+- [x] **2.** jemalloc — **built into FrankenPHP mimalloc binary** (no separate install needed)
+- [x] **3.** Redis everywhere — cache=DB1, sessions=DB2, queue=DB0; `phpredis` extension
+- [x] **3.** Laravel Horizon — running as systemd service
+- [x] **4.** Artisan caches — `config`, `route`, `event`, `view`, `--optimize-autoloader` on every deploy
+- [ ] **4.** `enlightn` audit — **SKIPPED: incompatible with Laravel 12**
+- [ ] **4.** N+1 detector — not applicable (no N+1-prone queries on current routes)
+- [x] **4.** `spatie/laravel-responsecache` — installed; Nginx micro-cache used as primary instead
+- [x] **4.** Laravel Pulse — installed at `/pulse`
+- [x] **4.** Swoole Tables / FrankenPHP worker state — rate_limits table configured in octane.php
+- [x] **4.** Hot-service singletons + persistent PDO — `PDO::ATTR_PERSISTENT => true`
+- [x] **5.** Nginx RAM micro-cache — `/dev/shm/nginx_octane_cache`, 30s TTL on `/`, cache HITs confirmed >90%
+- [x] **5+** Cloudflare free tier — edge cache with 30s TTL, Mumbai PoP serving Indian traffic
+- [x] **5+** Brotli compression — level 9, `Vary: Accept-Encoding`, 82% payload reduction
+- [x] **5+** HTML minification middleware — `MinifyHtml` middleware strips whitespace/comments, −25% raw HTML
+- [x] **6.** MariaDB tuning — 512MB InnoDB buffer pool, `flush_log_at_trx_commit=2`, `O_DIRECT`, slow log
+- [x] **6.** Persistent PDO — `ATTR_PERSISTENT => true`, `ATTR_EMULATE_PREPARES => false`
+- [ ] **6.** ProxySQL — **SKIPPED: not beneficial** (persistent PDO + FrankenPHP worker mode = max 4 persistent connections; peak usage was 2 connections ever)
+- [ ] **7.** Read replica — **N/A: single node**
+- [ ] **7.** Horizontal scale — **N/A: single node; Redis makes workers stateless-ready**
+- [x] **8.** Laravel Pulse monitoring — installed
+
+---
+
+### FrankenPHP Migration Notes
+
+Replaced Swoole with **FrankenPHP v1.12.4** (mimalloc variant):
+
+| | Swoole 6.x + PHP 8.3 | FrankenPHP 1.12.4 + PHP 8.5 |
+|---|---|---|
+| Direct RPS | 315 | **373 (+19%)** |
+| p50 latency | 154ms | **130ms (−16%)** |
+| p99 latency | 552ms | **166ms (−62%)** |
+| HTTPS+cache RPS | 3,846 | **4,376 (+14%)** |
+| jemalloc | ❌ crashed | ✅ mimalloc built-in |
+| OPcache preload | ❌ crashes on anon class | ✅ enabled |
+| HTTP/3 | ❌ | ✅ (when used standalone) |
+| PHP version | 8.3 (system) | **8.5.7 (embedded)** |
+
+**Key Swoole issues that drove migration:**
+- `max_requests` removed in Swoole 6.x
+- jemalloc + Swoole 6.x = `free(): invalid pointer` heap corruption (LD_PRELOAD removed)
+- OPcache preload with anonymous classes → crash
+
+---
+
+### Payload Size Progression
+
+| State | Raw | Gzip | Brotli |
+|---|---|---|---|
+| Original (no minify) | 41,975B | 8,034B | 6,852B |
+| After HTML minification | 31,429B | 7,319B | 6,445B |
+| Final (minify + brotli lvl 9) | 31,429B | 7,319B | **6,105B** |
+| Reduction vs raw | −25% | −82% | **−85%** |
+
+---
+
+### Actual vs Guide Estimates
+
+| Metric | Guide estimate | Actual |
+|---|---|---|
+| PHP-FPM baseline | ~900 RPS | ~240 RPS (2-core limit) |
+| + Octane | ~8,000 RPS | **315 RPS raw / 9,031 RPS cached** |
+| + Nginx RAM cache | 200k–500k RPS | **9,031 RPS** (SSL + 2-core ceiling) |
+| + CDN (Cloudflare) | not in guide | **<5ms from edge PoP** |
+
+> **Note on Nginx cache numbers:** the guide's 200k–500k estimate is for HTTP without SSL on dedicated hardware.
+> On this 2-core server with HTTPS via Cloudflare, the real ceiling is ~27k RPS over HTTP
+> (measured internally) and ~9k RPS over HTTPS before Cloudflare edge caching.
+> With Cloudflare in front, origin load drops to near-zero on cache hits — the effective
+> "RPS delivered to users" is Cloudflare-scale (unlimited), not origin-scale.
+
+---
+
+### Production Deploy Runbook (FrankenPHP)
+
+```bash
+cd /var/www/testingphp.trentiums.com/public
+git pull origin main
+sudo -u www-data composer install --optimize-autoloader --no-dev
+sudo -u www-data php8.3 artisan octane:install --server=frankenphp   # regenerates frankenphp-worker.php
+sudo -u www-data php8.3 artisan config:cache
+sudo -u www-data php8.3 artisan route:cache
+sudo -u www-data php8.3 artisan event:cache
+sudo -u www-data php8.3 artisan view:cache
+sudo systemctl reload octane      # graceful zero-downtime reload
+sudo rm -rf /dev/shm/nginx_octane_cache/*   # purge Nginx RAM cache
+# Cloudflare cache purges automatically after 30s TTL
+```
