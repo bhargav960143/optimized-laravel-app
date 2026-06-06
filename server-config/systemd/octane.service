@@ -1,0 +1,28 @@
+[Unit]
+Description=Laravel Octane (FrankenPHP)
+After=network.target redis.service mariadb.service
+Wants=redis.service
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/testingphp.trentiums.com/public
+Environment="FRANKENPHP_BINARY=/usr/local/bin/frankenphp"
+Environment="APP_ENV=production"
+Environment="PHP_OPCACHE_ENABLE=1"
+Environment="PHP_OPCACHE_JIT=tracing"
+Environment="PHP_OPCACHE_JIT_BUFFER_SIZE=64M"
+Environment="PHP_OPCACHE_MEMORY_CONSUMPTION=128"
+Environment="PHP_OPCACHE_MAX_ACCELERATED_FILES=15000"
+Environment="PHP_OPCACHE_VALIDATE_TIMESTAMPS=0"
+Environment="PHP_OPCACHE_PRELOAD=/var/www/testingphp.trentiums.com/public/preload.php"
+Environment="PHP_OPCACHE_PRELOAD_USER=www-data"
+ExecStart=/usr/bin/php8.3 artisan octane:start --server=frankenphp --host=127.0.0.1 --port=8000 --workers=4
+ExecReload=/usr/bin/php8.3 artisan octane:reload
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

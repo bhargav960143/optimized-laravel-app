@@ -1,0 +1,18 @@
+[Unit]
+Description=Laravel Horizon (Queue Manager)
+After=network.target redis.service
+Wants=redis.service
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/testingphp.trentiums.com/public
+ExecStart=/usr/bin/php8.3 artisan horizon
+ExecReload=/bin/kill -USR1 $MAINPID
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/www/testingphp.trentiums.com/logs/horizon.log
+StandardError=append:/var/www/testingphp.trentiums.com/logs/horizon-error.log
+
+[Install]
+WantedBy=multi-user.target
