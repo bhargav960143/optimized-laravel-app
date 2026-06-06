@@ -5,24 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SwiftRide — Taxi & Tour Booking</title>
     <meta name="description" content="Book outstation cabs, airport transfers, sightseeing tours and holiday packages. 24/7 service, verified drivers, best price guarantee.">
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    colors: { brand: '#FACC15' },
-                    animation: {
-                        'fade-up': 'fadeUp 0.6s ease forwards',
-                        'fade-in': 'fadeIn 0.5s ease forwards',
-                    },
-                    keyframes: {
-                        fadeUp:  { '0%': { opacity: 0, transform: 'translateY(24px)' }, '100%': { opacity: 1, transform: 'translateY(0)' } },
-                        fadeIn:  { '0%': { opacity: 0 }, '100%': { opacity: 1 } },
-                    }
-                }
-            }
-        }
-    </script>
+    @vite(['resources/css/app.css', 'resources/js/app.js'])
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <style>
         [x-cloak] { display: none !important; }
