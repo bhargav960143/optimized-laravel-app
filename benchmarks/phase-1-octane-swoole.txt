@@ -1,0 +1,23 @@
+Phase 1 — Octane + Swoole (2-core, 2GB RAM server)
+Date: 2026-06-06
+Command: wrk -t2 -c50 -d15s --latency https://testingphp.trentiums.com/
+Note: Testing against Laravel default home route (session-bearing, no cache bypass)
+
+Thread Stats   Avg      Stdev     Max   +/- Stdev
+  Latency   103.39ms  286.46ms   1.58s    89.93%
+  Req/Sec   144.17     89.50   270.00     55.71%
+Latency Distribution:
+  50%    3.94ms
+  75%    6.06ms
+  90%  503.55ms
+  99%    1.50s
+Requests/sec: 213.79
+Transfer/sec: 16.68MB
+Requests in 15s: 3226
+Timeouts: 136
+
+Notes:
+- p50 is excellent (3.94ms) — Octane workers handling fast
+- p99 spike (1.5s) + timeouts = 4 Octane workers being overwhelmed by 50 concurrent
+- No cache hits because Laravel sets session cookies on every request
+- Real public API endpoints (no session middleware) will cache and perform much better
