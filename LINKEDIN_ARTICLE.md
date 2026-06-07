@@ -1,4 +1,4 @@
-# How We Squeezed 50,000+ RPS from a $12/month Server (Real Benchmarks, Every Step)
+# How We Built a Laravel Stack That Serves 50,000+ RPS on a $12/month Server — Here's Every Step
 
 Most performance guides show you theory. This one shows you actual numbers from a real production server — a 2-core, 2GB RAM VPS running a Laravel 12 taxi booking app.
 
@@ -28,11 +28,23 @@ Here's what we achieved at the end:
 
 | Layer | RPS | Avg Latency |
 |---|---|---|
-| FrankenPHP (PHP app, cold) | 401 | 24.9ms |
+| FrankenPHP (PHP app, uncached) | 401 | 24.9ms |
 | Nginx RAM cache (HIT) | **50,839** | **0.38ms** |
 | Cloudflare edge cache | 809 | 82ms |
 
-That 127x multiplier between cold PHP and cached response — that's the story.
+To be clear: the 50,839 RPS is Nginx serving a pre-cached response from RAM — PHP never runs for those requests. The PHP app itself does 401 RPS. The 127x multiplier comes entirely from the caching layer, not from making PHP faster.
+
+**Benchmark methodology:** All numbers measured with `wrk` from an external client on the same datacenter network:
+```bash
+# PHP baseline (cache disabled)
+wrk -t4 -c100 -d30s http://yourdomain.com/
+
+# Nginx RAM cache (cache warmed, HIT)
+wrk -t8 -c200 -d30s http://yourdomain.com/
+
+# Cloudflare edge (cf-cache-status: HIT confirmed)
+wrk -t4 -c100 -d30s https://yourdomain.com/
+```
 
 ---
 
@@ -40,12 +52,12 @@ That 127x multiplier between cold PHP and cached response — that's the story.
 
 We started with Laravel Octane + Swoole 6.x. It works, but Swoole had a blocking issue: **OPcache preloading crashes with anonymous classes** in Swoole 6.x. We had to disable preload entirely.
 
-FrankenPHP (v1.12.3) fixed that. It embeds PHP 8.5.7 with its own runtime, ships with the **mimalloc allocator** (lower memory fragmentation), and unlocks OPcache preload.
+FrankenPHP (v1.12.3) fixed that. It ships with the **mimalloc allocator** (lower memory fragmentation) and unlocks OPcache preload.
 
 **Migration:** Drop-in swap. Change `--server=swoole` to `--server=frankenphp` in the Octane start command.
 
 ```ini
-ExecStart=/usr/bin/php8.3 artisan octane:start \
+ExecStart=/usr/bin/php8.5 artisan octane:start \
   --server=frankenphp \
   --host=127.0.0.1 \
   --port=8000 \
@@ -64,7 +76,7 @@ PHP_OPCACHE_JIT_BUFFER_SIZE=64M
 PHP_OPCACHE_MEMORY_CONSUMPTION=128
 PHP_OPCACHE_MAX_ACCELERATED_FILES=15000
 PHP_OPCACHE_VALIDATE_TIMESTAMPS=0
-PHP_OPCACHE_PRELOAD=/path/to/preload.php
+PHP_OPCACHE_PRELOAD=/var/www/testingphp.trentiums.com/public/bootstrap/cache/opcache-preload.php
 ```
 
 `VALIDATE_TIMESTAMPS=0` is critical in production — stops OPcache from checking file modification times on every request. On a 2-core machine this saves a measurable amount of syscall overhead.
@@ -111,7 +123,7 @@ Added Cloudflare with one Cache Rule:
 - **Edge TTL:** Ignore origin, use 30 seconds
 - **Browser TTL:** Respect origin
 
-This means the first visitor in 30 seconds hits our Nginx RAM cache. Every subsequent visitor in that window hits **Cloudflare's nearest PoP** — zero bytes leave their datacenter to reach us.
+This means the first visitor in 30 seconds hits our Nginx RAM cache. Every subsequent visitor in that window hits **Cloudflare's nearest PoP** — zero bytes reach our origin server for cache HITs.
 
 Result confirmed:
 ```
@@ -137,7 +149,7 @@ brotli_static on;
 - Brotli level 9: ~6,852 bytes
 - **14.7% smaller** — meaningful at scale
 
-Brotli level 9 has higher CPU cost at compression time, but `brotli_static on` pre-compresses static assets. For dynamic HTML, the tradeoff is worth it.
+Brotli level 9 has higher CPU cost at compression time, but `brotli_static on` pre-compresses static assets. For dynamic HTML served via PHP (401 RPS), the CPU overhead is acceptable on 2 cores. For cached pages, Nginx stores and serves the already-compressed response — no re-compression per request.
 
 ---
 
@@ -152,7 +164,7 @@ $html = preg_replace('/\s{2,}/s', ' ', $html);
 
 Preserves `<pre>`, `<script>`, `<style>`, and `<textarea>` blocks. Strips `<!-- comments -->` (except IE conditionals).
 
-**Applied to both `web` and `api` middleware groups** — every HTML response is minified before it hits the cache or Cloudflare.
+**Applied to the `web` middleware group only** — HTML responses are minified before hitting the cache or Cloudflare. API routes return JSON and are excluded.
 
 ---
 
@@ -164,7 +176,9 @@ innodb_flush_method = O_DIRECT
 innodb_flush_log_at_trx_commit = 2
 ```
 
-On 2GB RAM, 512MB buffer pool is the right ceiling — leaves headroom for PHP workers (217MB), Redis (~50MB), and OS. `O_DIRECT` bypasses the OS page cache for InnoDB (avoids double caching). `flush=2` trades per-transaction fsync for 1-second batched flush — safe for a web app, big latency win.
+On 2GB RAM, 512MB buffer pool is the right ceiling — leaves headroom for PHP workers (217MB), Redis (~50MB), and OS. `O_DIRECT` bypasses the OS page cache for InnoDB (avoids double caching). `flush=2` trades per-transaction fsync for 1-second batched flush — significant latency win.
+
+**Warning:** `innodb_flush_log_at_trx_commit = 2` means a server crash can lose up to 1 second of committed writes. For a payment app this is a real tradeoff — a booking confirmed to the user could vanish on hard crash. Mitigate with UPS/reliable hosting, and confirm with your payment gateway's webhook flow that you can recover from missing records. Use `flush=1` (default, full durability) if that risk is unacceptable.
 
 ---
 
@@ -184,7 +198,7 @@ Separate DBs prevent sessions from evicting cache entries under memory pressure.
 
 We evaluated ProxySQL (connection pooling proxy for MySQL). On paper it sounds useful. In practice:
 
-- Peak DB connections: **2** (PDO persistent connections)
+- Active DB connections under load: low (PDO persistent connections)
 - ProxySQL would add: 1–3ms latency per query for routing overhead
 
 Decision: skip. Always measure before adding infrastructure.
@@ -275,7 +289,7 @@ Browser → Cloudflare Edge (nearest PoP)
 
 ## Key Takeaways
 
-**1. Caching layers multiply, not add.** Nginx RAM cache + Cloudflare means most requests never touch PHP. The PHP performance (401 RPS) barely matters for cacheable pages.
+**1. Caching layers multiply, not add.** Nginx RAM cache + Cloudflare means most requests never touch PHP. The PHP app does 401 RPS uncached — caching turns that into 50,000+ for public pages.
 
 **2. Test before adding workers.** 8 workers on 2 cores = same throughput, double RAM. Always benchmark your specific hardware.
 
@@ -288,9 +302,9 @@ Browser → Cloudflare Edge (nearest PoP)
 ---
 
 **Final numbers on a $12/month server:**
-- Cold PHP: 401 RPS
+- Uncached PHP: 401 RPS
 - Nginx RAM cache: 50,839 RPS
-- Cloudflare edge: effectively unlimited for cached pages
+- Cloudflare edge: origin receives zero requests for cache HITs
 
 If you're building on a budget and think you need to scale the box first — you probably don't. Optimize the stack.
 
