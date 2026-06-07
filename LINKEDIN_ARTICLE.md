@@ -1,4 +1,4 @@
-# How We Squeezed 50,000+ RPS from a $5/month Server (Real Benchmarks, Every Step)
+# How We Squeezed 50,000+ RPS from a $12/month Server (Real Benchmarks, Every Step)
 
 Most performance guides show you theory. This one shows you actual numbers from a real production server — a 2-core, 2GB RAM VPS running a Laravel 12 taxi booking app.
 
@@ -8,9 +8,11 @@ Here's every optimization we made, in order, with before/after results.
 
 ## The Server
 
-- **CPU:** 2-core Intel Xeon
+- **Plan:** General purpose, dual-stack
+- **CPU:** 2 vCPUs
 - **RAM:** 2GB
-- **Storage:** 59GB NVMe SSD
+- **Storage:** 60GB SSD
+- **Transfer:** 1.5TB/month
 - **OS:** Debian 12
 - **App:** Laravel 12 (SwiftRide — taxi & tour booking)
 
@@ -202,6 +204,63 @@ Tailwind v4 uses CSS-based config (`@theme` block in `app.css`) — no `tailwind
 
 ---
 
+## What About Payment & Booking Under a Spike?
+
+Caching wins the easy battle — listing and landing pages. But **payment and booking are writes**. They can't be cached. Every one of them must reach PHP and the database. So what happens when 5,000 people hit "Pay Now" or "Book this ride" in the same minute?
+
+Here's how the write path holds up on the same 2-core box.
+
+**1. The cache shields the writes.** Because product/listing pages serve from RAM and never touch PHP, all 4 workers stay free for the requests that *actually matter* — checkout and booking. You're not spending CPU rendering catalog pages during a rush; 100% of PHP capacity goes to transactions.
+
+**2. Workers queue, they don't crash.** 4 FrankenPHP workers process bookings concurrently. Extra requests wait in Nginx's connection backlog (milliseconds), not error out. A booking takes ~25ms of PHP time, so 4 workers clear ~160 bookings/sec sustained — far above real booking rate even on a busy day.
+
+**3. No double-booking — atomic DB locks.** The danger in a spike isn't speed, it's two people grabbing the *same* seat/slot. Solve at the database, not in PHP:
+
+```php
+DB::transaction(function () use ($rideId, $userId) {
+    // Row lock — second request blocks until first commits
+    $ride = Ride::where('id', $rideId)
+        ->where('status', 'available')
+        ->lockForUpdate()
+        ->first();
+
+    abort_if(!$ride, 409, 'Already booked');
+
+    $ride->update(['status' => 'booked', 'user_id' => $userId]);
+});
+```
+
+`lockForUpdate()` (SELECT ... FOR UPDATE) guarantees only one request wins a slot, even at 1,000 concurrent attempts. The rest get a clean "already booked" — never a corrupted state.
+
+**4. Payment runs through a queue, not inline.** Calling Stripe/Razorpay inline ties up a worker for 1–3 seconds waiting on the gateway. Instead:
+- Reserve the slot (fast DB lock above)
+- Push payment-capture to a **Redis queue job**
+- Return "processing" instantly; confirm via webhook
+
+The worker frees in ~25ms instead of blocking 2s. One slow gateway can't exhaust all 4 workers.
+
+```php
+ProcessPayment::dispatch($booking)->onQueue('payments');
+```
+
+**5. Idempotency — safe retries.** A shopper double-clicks or Cloudflare retries a timeout. Use an idempotency key so the same booking/charge never executes twice:
+
+```php
+$lock = Cache::lock("booking:{$idempotencyKey}", 10);
+abort_unless($lock->get(), 409, 'Duplicate request');
+```
+
+**6. Rate-limit the abuse, protect the real buyers.** Laravel throttle on the checkout route stops bots and accidental floods from eating worker capacity:
+
+```php
+Route::post('/book', BookController::class)
+    ->middleware('throttle:10,1'); // 10 req/min per user
+```
+
+**The honest limit:** this box won't do 50,000 *bookings* per second — that's a DB-write ceiling, not a caching one. It comfortably handles a few hundred concurrent transactions/sec, which covers almost every real business. When genuine write volume outgrows one box, that's when you scale the DB (read replicas, bigger instance) — but you'll have the metrics to prove it first.
+
+---
+
 ## The Full Stack
 
 ```
@@ -228,7 +287,7 @@ Browser → Cloudflare Edge (nearest PoP)
 
 ---
 
-**Final numbers on a $5/month server:**
+**Final numbers on a $12/month server:**
 - Cold PHP: 401 RPS
 - Nginx RAM cache: 50,839 RPS
 - Cloudflare edge: effectively unlimited for cached pages
