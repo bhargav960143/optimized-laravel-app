@@ -40,7 +40,7 @@ That 127x multiplier between cold PHP and cached response — that's the story.
 
 We started with Laravel Octane + Swoole 6.x. It works, but Swoole had a blocking issue: **OPcache preloading crashes with anonymous classes** in Swoole 6.x. We had to disable preload entirely.
 
-FrankenPHP (v1.12.4) fixed that. It embeds PHP 8.5.7 with its own runtime, ships with the **mimalloc allocator** (lower memory fragmentation), and unlocks OPcache preload.
+FrankenPHP (v1.12.3) fixed that. It embeds PHP 8.5.7 with its own runtime, ships with the **mimalloc allocator** (lower memory fragmentation), and unlocks OPcache preload.
 
 **Migration:** Drop-in swap. Change `--server=swoole` to `--server=frankenphp` in the Octane start command.
 
