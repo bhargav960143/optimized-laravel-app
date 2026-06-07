@@ -12,7 +12,6 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        $middleware->appendToGroup('api', MinifyHtml::class);
         $middleware->appendToGroup('web', MinifyHtml::class);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

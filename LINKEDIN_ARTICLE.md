@@ -56,7 +56,7 @@ FrankenPHP (v1.12.3) fixed that. It ships with the **mimalloc allocator** (lower
 **Migration:** Drop-in swap. Change `--server=swoole` to `--server=frankenphp` in the Octane start command.
 
 ```ini
-ExecStart=/usr/bin/php8.5 artisan octane:start \
+ExecStart=/usr/bin/php8.3 artisan octane:start \
   --server=frankenphp \
   --host=127.0.0.1 \
   --port=8000 \
@@ -77,7 +77,7 @@ PHP_OPCACHE_JIT_BUFFER_SIZE=64M
 PHP_OPCACHE_MEMORY_CONSUMPTION=128
 PHP_OPCACHE_MAX_ACCELERATED_FILES=15000
 PHP_OPCACHE_VALIDATE_TIMESTAMPS=0
-PHP_OPCACHE_PRELOAD=/var/www/testingphp.trentiums.com/public/bootstrap/cache/opcache-preload.php
+PHP_OPCACHE_PRELOAD=/var/www/testingphp.trentiums.com/public/preload.php
 ```
 
 `VALIDATE_TIMESTAMPS=0` is critical in production — stops OPcache from checking file modification times on every request. On a 2-core machine this saves a measurable amount of syscall overhead.
