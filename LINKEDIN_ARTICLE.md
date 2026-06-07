@@ -34,17 +34,16 @@ Here's what we achieved at the end:
 
 To be clear: the 50,839 RPS is Nginx serving a pre-cached response from RAM — PHP never runs for those requests. The PHP app itself does 401 RPS. The 127x multiplier comes entirely from the caching layer, not from making PHP faster.
 
-**Benchmark methodology:** All numbers measured with `wrk` from an external client on the same datacenter network:
+**Benchmark methodology:** PHP baseline and Nginx cache numbers measured with `wrk` from a client on the same datacenter network (eliminates internet latency). Same concurrency for both so the comparison is fair:
 ```bash
-# PHP baseline (cache disabled)
-wrk -t4 -c100 -d30s http://yourdomain.com/
+# PHP baseline (Nginx cache disabled)
+wrk -t4 -c100 -d30s http://testingphp.trentiums.com/
 
-# Nginx RAM cache (cache warmed, HIT)
-wrk -t8 -c200 -d30s http://yourdomain.com/
-
-# Cloudflare edge (cf-cache-status: HIT confirmed)
-wrk -t4 -c100 -d30s https://yourdomain.com/
+# Nginx RAM cache (cache warmed, confirmed HIT via X-Cache header)
+wrk -t4 -c100 -d30s http://testingphp.trentiums.com/
 ```
+
+**Note on the Cloudflare row:** Not directly comparable — measured over the public internet from a remote client near a Cloudflare PoP. The 82ms latency is geographic round-trip time, not server processing. The 809 RPS reflects internet bandwidth constraints, not origin capacity. Once Cloudflare has a HIT, the origin server receives zero requests regardless of external RPS.
 
 ---
 
@@ -70,6 +69,8 @@ ExecStart=/usr/bin/php8.5 artisan octane:start \
 
 With FrankenPHP, we enabled what Swoole was blocking:
 
+These are FrankenPHP/Docker environment variables. If configuring via standard `php.ini` instead, the equivalent keys are `opcache.jit`, `opcache.jit_buffer_size`, `opcache.memory_consumption`, etc.
+
 ```ini
 PHP_OPCACHE_JIT=tracing
 PHP_OPCACHE_JIT_BUFFER_SIZE=64M
@@ -80,6 +81,16 @@ PHP_OPCACHE_PRELOAD=/var/www/testingphp.trentiums.com/public/bootstrap/cache/opc
 ```
 
 `VALIDATE_TIMESTAMPS=0` is critical in production — stops OPcache from checking file modification times on every request. On a 2-core machine this saves a measurable amount of syscall overhead.
+
+**The preload file doesn't exist automatically.** Laravel doesn't generate it. You need to create it manually listing the classes to preload, or use a package like `composer require bauisnessmann/laravel-opcache` to generate one. A minimal example:
+```php
+<?php
+// bootstrap/cache/opcache-preload.php
+$files = require __DIR__ . '/compiled.php';
+foreach ($files as $file) {
+    opcache_compile_file($file);
+}
+```
 
 ---
 
@@ -280,7 +291,7 @@ Route::post('/book', BookController::class)
 ```
 Browser → Cloudflare Edge (nearest PoP)
        → Nginx (RAM cache, Brotli, SSL termination)
-       → Laravel Octane / FrankenPHP (4 workers, OPcache JIT)
+       → Laravel Octane / FrankenPHP (4 workers, OPcache + preload)
        → Redis (cache, sessions, queues)
        → MariaDB (512MB buffer pool)
 ```
@@ -297,7 +308,7 @@ Browser → Cloudflare Edge (nearest PoP)
 
 **4. The free tier is enough.** Cloudflare free, 2GB VPS, open-source stack. Zero paid infrastructure beyond the server itself.
 
-**5. OPcache preload matters.** The difference between preload-enabled and disabled is measurable on cold starts. Swoole blocking it was costing us on every worker restart.
+**5. OPcache preload matters more than JIT for Laravel.** The difference between preload-enabled and disabled is measurable on cold starts. JIT helps CPU-bound code — Laravel is I/O-bound (DB, Redis, HTTP) so JIT impact is minimal (0–3% in practice). Preload is the real win. Swoole blocking it was costing us on every worker restart.
 
 ---
 
